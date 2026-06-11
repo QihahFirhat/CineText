@@ -90,10 +90,10 @@ if page == "1. Home/About":
     st.write("3. Click 'Analyze Sentiment' to see the prediction and the words that influenced the decision.")
     
     st.markdown("### Team Members")
-    st.info("👨‍💻 **Student 1 (NLP Engineer):** Data & Modeling Pipeline\n\n"
-            "👨‍💻 **You (Frontend Developer):** Streamlit Web Application\n\n"
-            "👨‍💻 **Student 3 (Data Analyst):** Visualizations & Metrics\n\n"
-            "👨‍💻 **Student 4 (Project Lead):** Documentation & Poster")
+    st.info("👨‍💻 **Mun Weng Yann (A24AI0067):** NLP Engineer\n\n"
+            "👨‍💻 **Nur Nadsyuha Bt. Mustafa (A24AI0117):** Frontend Developer\n\n"
+            "👨‍💻 **Areesha Nabila Bt. Dick Hilmi (A24AI0098):** Data Analyst\n\n"
+            "👨‍💻 **Faqihah Humaira' Bt. Muhammad Firhat (A24AI0028):** Project Lead")
 
 # ----------------------------------------------------------------------
 # 4. PAGE 2: TEXT ANALYZER
