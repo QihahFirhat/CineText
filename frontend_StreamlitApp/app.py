@@ -1,6 +1,7 @@
 import re
 import time
 import joblib
+import requests
 import matplotlib
 import matplotlib.pyplot as plt
 import nltk
@@ -12,21 +13,54 @@ from bs4 import BeautifulSoup
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from wordcloud import WordCloud
+from deep_translator import GoogleTranslator
+from transformers import pipeline
 
+# Set matplotlib backend for Streamlit compatibility
 matplotlib.use("Agg")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PAGE CONFIG
+# PAGE CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="CineScope · Sentiment Analyzer",
     page_icon="🎬",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# NLTK SETUP
+# CUSTOM CSS FOR ENHANCED READABILITY & TYPOGRAPHY
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown(
+    """
+    <style>
+    p, div, span, label, li {
+        font-size: 18px !important;
+    }
+    textarea {
+        font-size: 18px !important;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 42px !important;
+    }
+    button[data-baseweb="tab"] {
+        font-size: 20px !important;
+    }
+    .team-card {
+        padding: 15px;
+        border-radius: 10px;
+        background-color: #1e2230;
+        border: 1px solid #2a2f3f;
+        margin-bottom: 10px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NLTK DEPENDENCY SETUP
 # ──────────────────────────────────────────────────────────────────────────────
 for _resource, _path in [
     ("stopwords", "corpora/stopwords"),
@@ -43,7 +77,7 @@ _lemmatizer = WordNetLemmatizer()
 
 
 def clean_text(text: str) -> str:
-    """Exact pipeline from the NLP notebook."""
+    """Exact preprocessing pipeline matching the core NLP notebook workflow."""
     text = BeautifulSoup(str(text), "html.parser").get_text()
     text = text.lower()
     text = re.sub(r"[^a-z\s]", " ", text)
@@ -58,13 +92,25 @@ def clean_text(text: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DATA & MODEL LOADING
+# CORE MACHINE LEARNING & DATA PIPELINE LOADING
 # ──────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
-def load_models():
-    mdl = joblib.load("best_model.pkl")
-    vec = joblib.load("best_vectorizer.pkl")
-    return mdl, vec
+def load_classical_models():
+    try:
+        mdl = joblib.load("best_model.pkl")
+        vec = joblib.load("best_vectorizer.pkl")
+        return mdl, vec
+    except FileNotFoundError:
+        return None, None
+
+@st.cache_resource(show_spinner=False)
+def load_bert_pipeline():
+    try:
+        return pipeline("sentiment-analysis", model="nlptown/bert-base-multilingual-uncased-sentiment")
+    except Exception as e:
+        # Exposes the hidden error text right on the main application interface
+        st.error(f"🚨 Actual BERT Initialization Failure: {e}")
+        return None
 
 @st.cache_data(show_spinner=False)
 def load_sample_data():
@@ -73,24 +119,82 @@ def load_sample_data():
     except FileNotFoundError:
         return None
 
-models_loaded = False
-model = vectorizer = None
-try:
-    model, vectorizer = load_models()
-    models_loaded = True
-except FileNotFoundError:
-    pass
-
+model, vectorizer = load_classical_models()
+models_loaded = model is not None and vectorizer is not None
+bert_pipeline = load_bert_pipeline()
 df_sample = load_sample_data()
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# HELPER FUNCTIONS (Visualizations)
+# EXTERNAL WEB API & PREDICTION HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
+def search_movie(title: str) -> list:
+    """Fetches list matches from OMDb API."""
+    try:
+        # Tries to find local secrets first
+        api_key = st.secrets.get("OMDB_API_KEY", "7d2b863a")
+    except FileNotFoundError:
+        # Graceful fallback if secrets.toml file doesn't exist at all
+        api_key = "7d2b863a"
+        
+    url = f"http://www.omdbapi.com/?s={title}&apikey={api_key}"
+    try:
+        res = requests.get(url, timeout=5).json()
+        if res.get("Response") == "True":
+            return res.get("Search", [])
+    except Exception:
+        pass
+    return []
+
+def get_movie_details(imdb_id: str) -> dict:
+    """Fetches comprehensive details for a specific movie from OMDb API."""
+    try:
+        # Tries to find local secrets first
+        api_key = st.secrets.get("OMDB_API_KEY", "7d2b863a")
+    except FileNotFoundError:
+        # Graceful fallback if secrets.toml file doesn't exist at all
+        api_key = "7d2b863a"
+        
+    url = f"http://www.omdbapi.com/?i={imdb_id}&apikey={api_key}"
+    try:
+        res = requests.get(url, timeout=5).json()
+        if res.get("Response") == "True":
+            return res
+    except Exception:
+        pass
+    return {}
+
+def translate_to_english(text: str) -> str:
+    """Translates text from any source dialect to English."""
+    try:
+        return GoogleTranslator(source='auto', target='en').translate(text)
+    except Exception:
+        return text
+
+def predict_bert(text: str):
+    """Generates sentiment prediction profiles using Multilingual BERT."""
+    if bert_pipeline is None:
+        return "neutral", 3, 50.0
+    try:
+        res = bert_pipeline(text)[0]
+        label = res['label']  
+        stars = int(label.split()[0])
+        confidence = res['score'] * 100
+        sentiment = "positive" if stars >= 4 else "negative" if stars <= 2 else "neutral"
+        return sentiment, stars, confidence
+    except Exception:
+        return "neutral", 3, 50.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VISUALIZATION GENERATORS
 # ──────────────────────────────────────────────────────────────────────────────
 def decision_to_stars(score: float) -> int:
+    """Maps decision scores to a symmetric 1-5 star scale based on the [-3, 3] axis."""
     if   score >  1.5: return 5
     elif score >  0.5: return 4
-    elif score >  0.0: return 3
-    elif score > -0.5: return 2
+    elif score >= -0.5: return 3
+    elif score >= -1.5: return 2
     else:              return 1
 
 def make_wordcloud(freq: dict, colormap: str) -> plt.Figure:
@@ -111,7 +215,7 @@ def make_wordcloud(freq: dict, colormap: str) -> plt.Figure:
     return fig
 
 def global_wordcloud() -> plt.Figure:
-    """Creates a global wordcloud from the top 150 vocabulary words."""
+    if not models_loaded: return None
     feat_names = vectorizer.get_feature_names_out()
     coefs_all = np.abs(model.coef_[0])
     top_indices = np.argsort(coefs_all)[-150:]
@@ -175,6 +279,7 @@ def global_confusion_matrix() -> plt.Figure:
     return fig
 
 def global_top20_chart() -> plt.Figure:
+    if not models_loaded: return None
     coefs_all  = model.coef_[0]
     feat_names = vectorizer.get_feature_names_out()
     top_pos    = np.argsort(coefs_all)[-10:]
@@ -197,254 +302,358 @@ def global_top20_chart() -> plt.Figure:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ── PAGE 1: HOME & ABOUT HEADER
+# SIDEBAR NAVIGATION
 # ──────────────────────────────────────────────────────────────────────────────
-st.title("🎬 CineScope — Movie Sentiment Analyzer")
+st.sidebar.title("🎬 CineScope Menu")
+app_mode = st.sidebar.radio(
+    "Choose a section to explore:",
+    [
+        "🏠 Home / About",
+        "📝 Text Analyzer",
+        "📂 Data Explorer",
+        "📈 Visualizations",
+        "🤖 Model Info"
+    ]
+)
 
-st.markdown("### What problem are we solving?")
-st.write("With thousands of movie reviews generated online every day, it is impossible to read and categorize them all manually. Our NLP system automatically reads movie reviews and predicts the sentiment instantly.")
-
-st.markdown("### How to use this app:")
-st.write("1. Type or paste a movie review into the text box below.\n2. Click **Analyze Sentiment**.\n3. Explore the dashboard to see the prediction, confidence score, and the exact words that influenced the decision.")
-
+st.sidebar.divider()
 if not models_loaded:
-    st.error(
-        "**Model files not found.** Place `best_model.pkl` and "
-        "`best_vectorizer.pkl` in the same directory as `app.py`, "
-        "then refresh the page."
-    )
-
-st.divider()
+    st.sidebar.error("⚠️ Model files (`best_model.pkl` / `best_vectorizer.pkl`) missing.")
+else:
+    st.sidebar.success("✅ Models Loaded Successfully!")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ── PAGE 2: TEXT ANALYZER INPUT
+# 1. HOME / ABOUT SECTION
 # ──────────────────────────────────────────────────────────────────────────────
-user_input = st.text_area(
-    "**Enter a movie review:**",
-    height=160,
-    placeholder=(
-        'e.g. "The cinematography was breathtaking, '
-        'but the plot dragged on far too long..."'
-    ),
-    disabled=not models_loaded,
-)
-
-analyze_btn = st.button(
-    "Analyze Sentiment →",
-    type="primary",
-    disabled=not models_loaded or not user_input.strip(),
-    use_container_width=False,
-)
-
-st.divider()
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ── TEXT ANALYZER RESULTS AREA
-# ──────────────────────────────────────────────────────────────────────────────
-if analyze_btn and user_input.strip() and models_loaded:
-
-    with st.spinner("Running pipeline — cleaning → vectorizing → classifying…"):
-        time.sleep(0.6)
-
-        cleaned        = clean_text(user_input)
-        text_vec       = vectorizer.transform([cleaned])
-        prediction     = model.predict(text_vec)[0]
-        decision_score = float(model.decision_function(text_vec)[0])
-        stars          = decision_to_stars(decision_score)
-        raw_conf       = abs(decision_score) / (abs(decision_score) + 1.5) * 100
-        confidence     = min(raw_conf, 99.9)
-
-        feature_names = vectorizer.get_feature_names_out()
-        coefs         = model.coef_[0]
-        cleaned_tokens = set(cleaned.split())
-
-        pos_words, neg_words = {}, {}
-        for tok in cleaned_tokens:
-            if tok in vectorizer.vocabulary_:
-                idx = vectorizer.vocabulary_[tok]
-                coef = coefs[idx]
-                if coef > 0:
-                    pos_words[tok] = float(coef)
-                else:
-                    neg_words[tok] = float(abs(coef))
-
-    # VERDICT + METRICS
-    is_positive = prediction == "positive"
-    verdict_icon  = "🍿" if is_positive else "👎"
-    verdict_label = "Positive Sentiment" if is_positive else "Negative Sentiment"
-
-    st.subheader(f"{verdict_icon} {verdict_label}")
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Prediction",      "Positive" if is_positive else "Negative")
-    m2.metric("Confidence",      f"{confidence:.1f}%")
-    m3.metric("Pseudo Rating",   "⭐" * stars + "☆" * (5 - stars))
-    m4.metric("Architecture",    "LinearSVC / TF-IDF")
-
-    st.caption("**Decision-function score** — where this review sits on the raw classification axis:")
-    gauge_fig = score_distribution_chart(decision_score)
-    st.pyplot(gauge_fig, use_container_width=True)
-
-    st.divider()
-
-    # KEYWORD HIGHLIGHTING 
-    st.subheader("🔍 Word Impact Analysis")
-    st.caption(
-        "Words in your review are tagged by their influence on the model decision. "
-        "🟢 = pushes **positive** · 🔴 = pushes **negative** · untagged = not in vocabulary."
-    )
-
-    try:
-        from annotated_text import annotated_text
-        tokens = re.split(r"(\W+)", user_input)
-        annotation_list = []
-        for tok in tokens:
-            clean_tok = re.sub(r"[^a-z]", "", tok.lower())
-            lemma = _lemmatizer.lemmatize(clean_tok) if clean_tok else ""
-            if lemma in pos_words:
-                annotation_list.append((tok, "+", "#1b4332"))   
-            elif lemma in neg_words:
-                annotation_list.append((tok, "−", "#4a1010"))   
-            else:
-                annotation_list.append(tok)
-        annotated_text(*annotation_list)
-
-    except ImportError:
-        hl_col1, hl_col2 = st.columns(2)
-        with hl_col1:
-            st.success("**Positive indicators found:**\n\n" + (", ".join(f"`{w}`" for w in sorted(pos_words)) or "_none_"))
-        with hl_col2:
-            st.error("**Negative indicators found:**\n\n" + (", ".join(f"`{w}`" for w in sorted(neg_words)) or "_none_"))
-
-        st.caption("**Original review** (positive words **bolded**, negative words *italicised*):")
-        marked_text = []
-        for tok in re.split(r"(\W+)", user_input):
-            clean_tok = re.sub(r"[^a-z]", "", tok.lower())
-            lemma = _lemmatizer.lemmatize(clean_tok) if clean_tok else ""
-            if lemma in pos_words: marked_text.append(f"**{tok}**")
-            elif lemma in neg_words: marked_text.append(f"*{tok}*")
-            else: marked_text.append(tok)
-        st.markdown("".join(marked_text))
-
-    st.divider()
-
-    # LIVE WORD CLOUDS
-    st.subheader("☁️ Review Word Clouds")
-    st.caption("Generated from **this review only**, weighted by each word's LinearSVC coefficient magnitude.")
-
-    wc_col1, wc_col2 = st.columns(2)
-    with wc_col1:
-        st.markdown("**🟢 Positive signal words**")
-        if pos_words:
-            fig_pos = make_wordcloud(pos_words, "YlGn")
-            if fig_pos: st.pyplot(fig_pos, use_container_width=True)
-        else:
-            st.info("No positive-signal words from this review were found in the model vocabulary.")
-
-    with wc_col2:
-        st.markdown("**🔴 Negative signal words**")
-        if neg_words:
-            fig_neg = make_wordcloud(neg_words, "OrRd")
-            if fig_neg: st.pyplot(fig_neg, use_container_width=True)
-        else:
-            st.info("No negative-signal words from this review were found in the model vocabulary.")
-
-    total_tokens  = len(cleaned.split())
-    pct_pos       = len(pos_words) / total_tokens * 100 if total_tokens else 0
-    pct_neg       = len(neg_words) / total_tokens * 100 if total_tokens else 0
-    pct_neutral   = 100 - pct_pos - pct_neg
-
-    st.caption(f"Vocabulary breakdown — 🟢 Positive: **{len(pos_words)}** words ({pct_pos:.0f}%)  ·  🔴 Negative: **{len(neg_words)}** words ({pct_neg:.0f}%)  ·  ⬜ Out-of-vocab / neutral: {pct_neutral:.0f}%")
-
-    st.divider()
-
-elif not analyze_btn and models_loaded:
-    st.info("📝 Enter a movie review above and click **Analyze Sentiment** to see the full live dashboard.")
-    st.divider()
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ── PAGES 3, 4, 5: PROJECT DASHBOARD TABS
-# ──────────────────────────────────────────────────────────────────────────────
-tab_data, tab_viz, tab_model = st.tabs([
-    "📂 PAGE 3: Data Explorer", 
-    "📈 PAGE 4: Visualizations", 
-    "🤖 PAGE 5: Model Info & Team"
-])
-
-# -- 3. DATA EXPLORER ----------------------------------------------------------
-with tab_data:
-    st.subheader("Dataset Overview")
-    if df_sample is not None:
-        st.caption("Displaying a sample of the IMDB dataset used for training.")
-        st.dataframe(df_sample, use_container_width=True)
-    else:
-        st.info("⚠️ `IMDB Dataset.csv` not found in the local directory.")
+if app_mode == "🏠 Home / About":
+    st.title("🎬 CineScope — Movie Sentiment Analyzer")
+    st.markdown("---")
     
-    st.subheader("Dataset Distribution")
-    dist_df = pd.DataFrame({
-        "Split":   ["Positive", "Negative"],
-        "Reviews": [25000, 25000],
-    }).set_index("Split")
-    st.bar_chart(dist_df, color=["#39d98a"])
-    st.caption("IMDB 50k — perfectly balanced, 80/20 train-test split, stratified.")
+    col_desc, col_visual = st.columns([2, 1])
+    
+    with col_desc:
+        st.subheader("📌 Project Overview")
+        st.write(
+            "CineScope is an advanced text intelligence platform designed to decode human emotion behind "
+            "cinematic reviews. By combining classical statistical machine learning pipelines with "
+            "modern deep transformer networks, the application reads raw review texts and classifies "
+            "their basic tone instantly."
+        )
+        
+        st.subheader("⚠️ What problem are we solving?")
+        st.write(
+            "With thousands of movie reviews generated online every single day across platforms like IMDb, "
+            "Rotten Tomatoes, and social media, analyzing public opinion quickly becomes impossible "
+            "through human parsing alone. Our Natural Language Processing (NLP) pipeline automates this process, "
+            "turning large blocks of unstructured review text into clean, quantitative data insights instantly."
+        )
+        
+        st.subheader("🚀 How to use the app")
+        st.markdown(
+            "1. Switch over to the **📝 Text Analyzer** using the left sidebar menu.\n"
+            "2. (Optional) Search for a movie title to pull live synopsis details directly from the OMDb API.\n"
+            "3. Enter your own custom text review in the provided box (supports multiple languages!).\n"
+            "4. Choose your algorithmic architecture strategy and hit **Analyze Sentiment**."
+        )
 
-# -- 4. VISUALIZATIONS ---------------------------------------------------------
-with tab_viz:
+    with col_visual:
+        st.info("### 📊 System Quick Stats\n- **Target Dataset:** 50,000 IMDb Reviews\n- **Production Accuracy:** 89.43%\n- **Supported Languages:** Multilingual Translation Processing Enabled")
+
+    st.divider()
+    st.subheader("👥 Development Team Members")
+    
+    t1, t2, t3, t4 = st.columns(4)
+    team_data = [
+        (t1, "Mun Weng Yann", "A24AI0067", "NLP Engineer"),
+        (t2, "Nur Nadsyuha Bt. Mustafa", "A24AI0117", "Frontend Developer"),
+        (t3, "Areesha Nabila Bt. Dick Hilmi", "A24AI0098", "Data Analyst"),
+        (t4, "Faqihah Humaira' Bt. Muhammad Firhat", "A24AI0028", "Project Lead"),
+    ]
+    
+    for col, name, matric, role in team_data:
+        with col:
+            st.markdown(
+                f"""
+                <div class="team-card">
+                    <h4><b>{name}</b></h4>
+                    <p style='margin:0; font-size:15px !important;'>ID: <code>{matric}</code></p>
+                    <p style='margin:0; font-size:15px !important; color:#a78bfa;'><i>{role}</i></p>
+                </div>
+                """, 
+                unsafe_allow_html=True
+            )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. TEXT ANALYZER SECTION
+# ──────────────────────────────────────────────────────────────────────────────
+elif app_mode == "📝 Text Analyzer":
+    st.title("📝 Movie Review Analyzer")
+    st.markdown("Extract real-time sentiment metrics from custom text inputs or search live database entries.")
+    st.divider()
+    
+    st.subheader("🎥 Step 1: Search Movie Context (Optional)")
+    movie_name = st.text_input("Enter movie name to lookup metadata:", placeholder="e.g., Avengers, Titanic, Inception")
+    selected_movie = None
+
+    if movie_name:
+        movie_results = search_movie(movie_name)
+        if movie_results:
+            movie_options = {f"{m['Title']} ({m['Year']})": m["imdbID"] for m in movie_results}
+            selected_title = st.selectbox("Select the targeted entry matching your query:", list(movie_options.keys()))
+            selected_imdb_id = movie_options[selected_title]
+            selected_movie = get_movie_details(selected_imdb_id)
+
+            if selected_movie:
+                st.markdown("#### Found Movie Profile")
+                col_post, col_det = st.columns([1, 3])
+                with col_post:
+                    poster = selected_movie.get("Poster")
+                    if poster and poster != "N/A":
+                        st.image(poster, width=180)
+                    else:
+                        st.info("No poster image found.")
+                with col_det:
+                    st.write(f"**Title:** {selected_movie.get('Title', 'N/A')} ({selected_movie.get('Year', 'N/A')})")
+                    st.write(f"**Genre:** {selected_movie.get('Genre', 'N/A')} | **Director:** {selected_movie.get('Director', 'N/A')}")
+                    st.write(f"**IMDb Rating:** ⭐ {selected_movie.get('imdbRating', 'N/A')}/10")
+                    st.write(f"**Plot Synopsis:** {selected_movie.get('Plot', 'N/A')}")
+        else:
+            st.warning("No matches found via OMDb database. You can still write your review below.")
+
+    st.markdown("---")
+    st.subheader("✍️ Step 2: Input Review Text & Configure Options")
+    
+    c_input, c_opt = st.columns([2, 1])
+    with c_input:
+        user_input = st.text_area(
+            "Type or paste your review below:",
+            height=160,
+            placeholder="Write your thoughts... (Supports multiple languages like English, Malay, Chinese, etc.)"
+        )
+    with c_opt:
+        analysis_model = st.radio("Target Classifier Backend:", ["TF-IDF + SVM", "Multilingual BERT"])
+        enable_translation = st.checkbox("Translate text to English first (Recommended for TF-IDF + SVM)", value=True)
+
+    analyze_btn = st.button("Run Sentiment Analysis →", type="primary")
+    st.divider()
+
+    # Inference execution processing blocks
+    if analyze_btn and user_input.strip():
+        if analysis_model == "TF-IDF + SVM":
+            if not models_loaded:
+                st.error("Model assets not accessible in working directories.")
+            else:
+                with st.spinner("Processing text tokens through statistical pipeline..."):
+                    time.sleep(0.3)
+                    final_review = user_input
+                    if enable_translation:
+                        final_review = translate_to_english(user_input)
+
+                    cleaned = clean_text(final_review)
+                    text_vec = vectorizer.transform([cleaned])
+                    prediction = model.predict(text_vec)[0]
+
+                    decision_score = float(model.decision_function(text_vec)[0])
+                    stars = decision_to_stars(decision_score)
+                    raw_conf = abs(decision_score) / (abs(decision_score) + 1.5) * 100
+                    confidence = min(raw_conf, 99.9)
+
+                    feature_names = vectorizer.get_feature_names_out()
+                    coefs = model.coef_[0]
+                    cleaned_tokens = set(cleaned.split())
+
+                    pos_words, neg_words = {}, {}
+                    for tok in cleaned_tokens:
+                        if tok in vectorizer.vocabulary_:
+                            idx = vectorizer.vocabulary_[tok]
+                            coef = coefs[idx]
+                            if coef > 0:
+                                pos_words[tok] = float(coef)
+                            else:
+                                neg_words[tok] = float(abs(coef))
+
+                st.success("🎉 Analysis Completed Successfully!")
+                if enable_translation:
+                    st.write("**Processed English Translation Target:**")
+                    st.info(final_review)
+
+                is_positive = prediction == "positive"
+                st.subheader(f"Calculated Metric Matrix: {'🍿 Positive State' if is_positive else '👎 Negative State'}")
+                
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Output Prediction", "Positive" if is_positive else "Negative")
+                m2.metric("Confidence Score", f"{confidence:.2f}%")
+                m3.metric("Pseudo Rating Scale", "⭐" * stars + "☆" * (5 - stars))
+                m4.metric("Model Type", "LinearSVC / TF-IDF")
+
+                st.write("**Decision Score Visual Position:**")
+                st.pyplot(score_distribution_chart(decision_score), use_container_width=True)
+                
+                # Highlight word impact
+                st.subheader("🔍 Local Text Token Impact Mapping")
+                st.write("Below are the tokens that influenced the prediction (Green highlights support a positive score, Red indicates negative sentiment impact):")
+                try:
+                    from annotated_text import annotated_text
+                    tokens = re.split(r"(\W+)", final_review)
+                    annotation_list = []
+                    for tok in tokens:
+                        clean_tok = re.sub(r"[^a-z]", "", tok.lower())
+                        lemma = _lemmatizer.lemmatize(clean_tok) if clean_tok else ""
+                        if lemma in pos_words: annotation_list.append((tok, "+", "#1b4332"))   
+                        elif lemma in neg_words: annotation_list.append((tok, "−", "#4a1010"))   
+                        else: annotation_list.append(tok)
+                    annotated_text(*annotation_list)
+                except ImportError:
+                    hl_col1, hl_col2 = st.columns(2)
+                    with hl_col1: st.success("Positive Influences: " + ", ".join(f"`{w}`" for w in sorted(pos_words)) or "_None found_")
+                    with hl_col2: st.error("Negative Influences: " + ", ".join(f"`{w}`" for w in sorted(neg_words)) or "_None found_")
+
+                # Local review specific wordclouds
+                st.subheader("☁️ Single Review Feature Density Clouds")
+                wc_col1, wc_col2 = st.columns(2)
+                with wc_col1:
+                    if pos_words:
+                        st.pyplot(make_wordcloud(pos_words, "YlGn"), use_container_width=True)
+                    else: st.info("No positive features parsed.")
+                with wc_col2:
+                    if neg_words:
+                        st.pyplot(make_wordcloud(neg_words, "OrRd"), use_container_width=True)
+                    else: st.info("No negative features parsed.")
+
+        elif analysis_model == "Multilingual BERT":
+            if bert_pipeline is None:
+                st.error("Deep Transformer engine pipeline initialization failed.")
+            else:
+                with st.spinner("Processing transformer layer attention weights..."):
+                    sentiment, stars, confidence = predict_bert(user_input)
+
+                st.success("🎉 Transformer Evaluation Completed!")
+                st.subheader(f"Contextual Classification Profile: {sentiment.upper()}")
+
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Predicted Sentiment Class", sentiment.capitalize())
+                col2.metric("BERT Rated Star Equivalent", f"{stars}/5 ⭐")
+                col3.metric("Softmax Prediction Probability", f"{confidence:.2f}%")
+    elif analyze_btn:
+        st.warning("Please supply valid textual data inside the review box.")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. DATA EXPLORER SECTION
+# ──────────────────────────────────────────────────────────────────────────────
+elif app_mode == "📂 Data Explorer":
+    st.title("📂 Model Baseline Training Data Explorer")
+    st.markdown("Examine the structural configuration and distributions of the dataset source.")
+    st.divider()
+    
+    col_stat1, col_stat2 = st.columns([3, 2])
+    
+    with col_stat1:
+        st.subheader("📋 Production Set Sample Display")
+        if df_sample is not None:
+            st.write("Previewing first 100 rows of the 50,000 baseline IMDb review storage rows:")
+            st.dataframe(df_sample, use_container_width=True)
+        else:
+            st.info("⚠️ Core file `IMDB Dataset.csv` asset file path not found inside the local workspace.")
+            
+    with col_stat2:
+        st.subheader("📊 Primary Dataset Statistics Summary")
+        stats_df = pd.DataFrame({
+            "Dataset Metric Attribute": [
+                "Total Record Volume", 
+                "Positive Sentiment Subtotal", 
+                "Negative Sentiment Subtotal",
+                "Class Distribution Imbalance Ratio",
+                "Pre-Split Evaluation Partition Margin"
+            ],
+            "Value Metrics": [
+                "50,000 total document entries", 
+                "25,000 distinct review records", 
+                "25,000 distinct review records",
+                "Perfect 1:1 Balance Ratio (50.0% / 50.0%)",
+                "80% Training Baseline / 20% Held-Out Validation"
+            ]
+        }).set_index("Dataset Metric Attribute")
+        st.table(stats_df)
+        
+        st.subheader("📈 Ground Truth Class Balanced Vector Distribution")
+        dist_df = pd.DataFrame({"Split": ["Positive Sentiment", "Negative Sentiment"], "Reviews Count": [25000, 25000]}).set_index("Split")
+        st.bar_chart(dist_df, color=["#a78bfa"])
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. VISUALIZATIONS SECTION
+# ──────────────────────────────────────────────────────────────────────────────
+elif app_mode == "📈 Visualizations":
+    st.title("📈 Model Feature & Evaluation Visualizations")
+    st.markdown("Detailed breakdown of general features and performance indicators.")
+    st.divider()
+    
     if models_loaded:
         v_col1, v_col2 = st.columns(2)
-        
         with v_col1:
-            st.subheader("1. Global Vocabulary Word Cloud")
+            st.subheader("🔤 Global Vocabulary Word Cloud")
+            st.write("Extracted highly influential global text terms weighted using absolute model coefficients:")
             st.pyplot(global_wordcloud(), use_container_width=True)
             
-            st.subheader("2. Top 20 Global Features")
+            st.subheader("📊 Top 20 Strongest Model Features")
+            st.write("Top 10 positive (Green) versus Top 10 negative (Red) tokens calculated by weight coefficients:")
             st.pyplot(global_top20_chart(), use_container_width=True)
             
         with v_col2:
-            st.subheader("3. Accuracy by Model")
+            st.subheader("🏁 Core Testing Accuracy Across Architectures")
+            st.write("Evaluating alternative pipeline setups during technical validation tests:")
             st.pyplot(global_accuracy_chart(), use_container_width=True)
             
-            st.subheader("4. Confusion Matrix (TF-IDF + LinearSVC)")
+            st.subheader("🧮 LinearSVC Confusion Matrix Heatmap")
+            st.write("Performance distribution details across validation classification matrix cells:")
             st.pyplot(global_confusion_matrix(), use_container_width=True)
-            st.caption("Simulated from 89.43% accuracy on 10,000 test samples.")
+    else:
+        st.error("Visualization modules are disabled because model file weights are missing.")
 
-# -- 5. MODEL INFO & TEAM ------------------------------------------------------
-with tab_model:
-    st.subheader("Model Comparison Metrics")
+# ──────────────────────────────────────────────────────────────────────────────
+# 5. MODEL INFO SECTION
+# ──────────────────────────────────────────────────────────────────────────────
+elif app_mode == "🤖 Model Info":
+    st.title("🤖 Model Details & Performance Analysis")
+    st.markdown("Detailed technical specifications, configurations, and evaluation reports.")
+    st.divider()
+    
+    st.subheader("🧠 Algorithmic Framework Explanations")
+    st.write(
+        "Our system utilizes two distinct classification strategies:\n\n"
+        "1. **TF-IDF + Linear Support Vector Classifier (LinearSVC):** The core pipeline engine. Text features are "
+        "preprocessed, converted into weighted Term Frequency-Inverse Document Frequency vector representations, "
+        "and mapped using a linear separating hyperplane boundary optimized for high-dimensional sparse distributions.\n"
+        "2. **Multilingual BERT (Transformers Architecture):** A transformer pipeline (`bert-base-multilingual-uncased-sentiment`) "
+        "fine-tuned to read context bi-directionally across multiple sentence formats, outputting a precise star evaluation score "
+        "from 1 to 5."
+    )
+    
+    st.subheader("📉 Complete Comparative Performance Metrics")
     results_df = pd.DataFrame({
-        "Model":     ["BoW + Naïve Bayes", "BoW + LinearSVC", "TF-IDF + Naïve Bayes", "⭐ TF-IDF + LinearSVC"],
-        "Accuracy":  [0.8513, 0.8479, 0.8734, 0.8943],
-        "Precision": [0.8514, 0.8479, 0.8739, 0.8944],
-        "Recall":    [0.8513, 0.8479, 0.8734, 0.8943],
-        "F1-Score":  [0.8512, 0.8479, 0.8733, 0.8942],
-    }).set_index("Model")
-
+        "Algorithmic Model Configurations": ["Bag of Words + Naïve Bayes", "Bag of Words + LinearSVC", "TF-IDF + Naïve Bayes", "🏆 Selected Model: TF-IDF + LinearSVC"],
+        "Accuracy Score":  [0.8513, 0.8479, 0.8734, 0.8943],
+        "Precision Score": [0.8514, 0.8479, 0.8739, 0.8944],
+        "Recall Score":    [0.8513, 0.8479, 0.8734, 0.8943],
+        "F1-Score Metric":  [0.8512, 0.8479, 0.8733, 0.8942],
+    }).set_index("Algorithmic Model Configurations")
+    
     st.dataframe(
         results_df.style.format("{:.4f}").highlight_max(
-            axis=0, props="background-color: rgba(167,139,250,0.18); color: #a78bfa; font-weight: bold",
-        ),
-        use_container_width=True,
+            axis=0, 
+            props="background-color: rgba(167,139,250,0.18); color: #a78bfa; font-weight: bold;"
+        ), 
+        use_container_width=True
     )
-    st.caption("**Best pipeline:** TF-IDF (15k features, bigram) + LinearSVC achieves 89.43% accuracy and 0.8942 F1-Score on the 10k held-out test set.")
     
-    st.divider()
-
-    cfg1, cfg2 = st.columns(2)
-    with cfg1:
-        st.markdown("**Preprocessing Pipeline**")
-        st.markdown("- BeautifulSoup HTML stripping\n- Lowercase normalisation\n- Non-alpha character removal\n- NLTK English stopword filter\n- WordNet lemmatization")
-    with cfg2:
-        st.markdown("**TF-IDF Vectorizer & LinearSVC Config**")
-        st.markdown("- `max_features = 15,000` & `ngram_range = (1, 2)`\n- Penalty: L2 · Loss: squared hinge\n- Confidence via `decision_function` (pseudo-probability)")
-
-    st.divider()
-    
-    st.subheader("Team")
-    t1, t2, t3, t4 = st.columns(4)
-    for col, name, matric, role in [
-        (t1, "Mun Weng Yann",                       "A24AI0067", "NLP Engineer"),
-        (t2, "Nur Nadsyuha Bt. Mustafa",            "A24AI0117", "Frontend Developer"),
-        (t3, "Areesha Nabila Bt. Dick Hilmi",       "A24AI0098", "Data Analyst"),
-        (t4, "Faqihah Humaira' Bt. Muhammad Firhat","A24AI0028","Project Lead"),
-    ]:
-        col.markdown(f"**{name}** \n`{matric}`  \n_{role}_")
+    st.subheader("🛠️ Technical Pipeline Training Details")
+    st.markdown(
+        """
+        * **Preprocessing Configuration:** Text is standardized by stripping HTML tags via BeautifulSoup, converted to lowercase, 
+          filtered via custom regular expressions for standard alphabetical formats, and stripped of classic English stop words. 
+          Tokens are then standardized via WordNet Lemmatization.
+        * **Feature Vectorizer Constraints:** `TfidfVectorizer` mapping setup captures single word sequences (unigrams) while 
+          ignoring sparse noise components.
+        * **Optimization Constraints:** The `LinearSVC` model uses squared hinge loss functions initialized with penalty parameter $C=1.0$ 
+          and configured with convergence criteria iteration targets capped at $10,000$ passes.
+        """
+    )
